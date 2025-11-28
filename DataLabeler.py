@@ -3,6 +3,8 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 from PIL import Image, ImageTk
 import os
 import json
+import xml.etree.ElementTree as ET
+from datetime import datetime
 
 class DataLabeler:
     def __init__(self, root):
@@ -28,10 +30,14 @@ class DataLabeler:
         # Paths
         self.unlabeled_path = "Unlabeled_Data"
         self.labeled_path = "Labeled_Data"
+        self.pytorch_path = os.path.join(self.labeled_path, "pytorch")
         
         # Create directories if they don't exist
         os.makedirs(self.unlabeled_path, exist_ok=True)
         os.makedirs(self.labeled_path, exist_ok=True)
+        os.makedirs(self.pytorch_path, exist_ok=True)
+        os.makedirs(os.path.join(self.pytorch_path, "annotations"), exist_ok=True)
+        os.makedirs(os.path.join(self.pytorch_path, "images"), exist_ok=True)
         
         self.setup_ui()
         
@@ -96,7 +102,18 @@ class DataLabeler:
         save_frame = ttk.LabelFrame(control_frame, text="Save", padding="5")
         save_frame.pack(fill=tk.X, pady=(0, 10))
         
+        # Save format selection
+        ttk.Label(save_frame, text="Save Format:").pack(anchor=tk.W)
+        self.save_format = tk.StringVar(value="all")
+        format_frame = ttk.Frame(save_frame)
+        format_frame.pack(fill=tk.X, pady=2)
+        
+        ttk.Radiobutton(format_frame, text="All Formats", variable=self.save_format, value="all").pack(anchor=tk.W)
+        ttk.Radiobutton(format_frame, text="YOLO Only", variable=self.save_format, value="yolo").pack(anchor=tk.W)
+        ttk.Radiobutton(format_frame, text="PyTorch Only", variable=self.save_format, value="pytorch").pack(anchor=tk.W)
+        
         ttk.Button(save_frame, text="Save Annotations", command=self.save_annotations).pack(fill=tk.X, pady=2)
+        ttk.Button(save_frame, text="Export PyTorch Dataset", command=self.export_pytorch_dataset).pack(fill=tk.X, pady=2)
         
         # Image display
         canvas_frame = ttk.LabelFrame(main_frame, text="Image", padding="5")
@@ -363,60 +380,486 @@ class DataLabeler:
         try:
             # Get image filename without extension
             filename = os.path.splitext(os.path.basename(self.current_image_path))[0]
-            
-            # Save in YOLO format
-            txt_path = os.path.join(self.labeled_path, f"{filename}.txt")
-            json_path = os.path.join(self.labeled_path, f"{filename}.json")
+            save_format = self.save_format.get()
             
             img_width, img_height = self.current_image.size
             
-            # Save YOLO format (class_id center_x center_y width height - normalized)
-            with open(txt_path, 'w') as f:
+            if save_format in ["all", "yolo"]:
+                # Save in YOLO format
+                txt_path = os.path.join(self.labeled_path, f"{filename}.txt")
+                json_path = os.path.join(self.labeled_path, f"{filename}.json")
+                
+                # Save YOLO format (class_id center_x center_y width height - normalized)
+                with open(txt_path, 'w') as f:
+                    for annotation in self.rectangles:
+                        label = annotation['label']
+                        if label in self.labels:
+                            class_id = self.labels.index(label)
+                        else:
+                            class_id = 0
+                        
+                        x1, y1, x2, y2 = annotation['bbox']
+                        
+                        # Convert to YOLO format (normalized center coordinates and dimensions)
+                        center_x = (x1 + x2) / 2 / img_width
+                        center_y = (y1 + y2) / 2 / img_height
+                        width = (x2 - x1) / img_width
+                        height = (y2 - y1) / img_height
+                        
+                        f.write(f"{class_id} {center_x:.6f} {center_y:.6f} {width:.6f} {height:.6f}\n")
+                
+                # Save JSON format for easier reading
+                annotations_data = {
+                    'image_path': self.current_image_path,
+                    'image_size': [img_width, img_height],
+                    'labels': self.labels,
+                    'annotations': []
+                }
+                
                 for annotation in self.rectangles:
-                    label = annotation['label']
-                    if label in self.labels:
-                        class_id = self.labels.index(label)
-                    else:
-                        class_id = 0
-                    
-                    x1, y1, x2, y2 = annotation['bbox']
-                    
-                    # Convert to YOLO format (normalized center coordinates and dimensions)
-                    center_x = (x1 + x2) / 2 / img_width
-                    center_y = (y1 + y2) / 2 / img_height
-                    width = (x2 - x1) / img_width
-                    height = (y2 - y1) / img_height
-                    
-                    f.write(f"{class_id} {center_x:.6f} {center_y:.6f} {width:.6f} {height:.6f}\n")
+                    annotations_data['annotations'].append({
+                        'label': annotation['label'],
+                        'bbox': annotation['bbox']
+                    })
+                
+                with open(json_path, 'w') as f:
+                    json.dump(annotations_data, f, indent=2)
+                
+                # Also save labels list
+                labels_path = os.path.join(self.labeled_path, "classes.txt")
+                with open(labels_path, 'w') as f:
+                    for label in self.labels:
+                        f.write(f"{label}\n")
             
-            # Save JSON format for easier reading
-            annotations_data = {
-                'image_path': self.current_image_path,
-                'image_size': [img_width, img_height],
-                'labels': self.labels,
-                'annotations': []
-            }
-            
-            for annotation in self.rectangles:
-                annotations_data['annotations'].append({
-                    'label': annotation['label'],
-                    'bbox': annotation['bbox']
-                })
-            
-            with open(json_path, 'w') as f:
-                json.dump(annotations_data, f, indent=2)
-            
-            # Also save labels list
-            labels_path = os.path.join(self.labeled_path, "classes.txt")
-            with open(labels_path, 'w') as f:
-                for label in self.labels:
-                    f.write(f"{label}\n")
+            if save_format in ["all", "pytorch"]:
+                # Save PyTorch formats
+                self.save_pytorch_formats(filename, img_width, img_height)
             
             self.status_var.set(f"Saved annotations: {filename}")
-            messagebox.showinfo("Success", f"Annotations saved successfully!\n\nFiles created:\n- {filename}.txt (YOLO format)\n- {filename}.json (readable format)\n- classes.txt (label definitions)")
+            
+            # Show appropriate success message
+            if save_format == "yolo":
+                messagebox.showinfo("Success", f"YOLO annotations saved successfully!\n\nFiles created:\n- {filename}.txt (YOLO format)\n- {filename}.json (readable format)\n- classes.txt (label definitions)")
+            elif save_format == "pytorch":
+                messagebox.showinfo("Success", f"PyTorch annotations saved successfully!\n\nFiles created:\n- {filename}_coco.json (COCO format)\n- {filename}.xml (Pascal VOC format)\n- {filename}_pytorch.json (PyTorch format)")
+            else:
+                messagebox.showinfo("Success", f"All format annotations saved successfully!\n\nYOLO files: {filename}.txt, {filename}.json, classes.txt\nPyTorch files: {filename}_coco.json, {filename}.xml, {filename}_pytorch.json")
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save annotations: {str(e)}")
+    
+    def save_pytorch_formats(self, filename, img_width, img_height):
+        """Save annotations in PyTorch-compatible formats"""
+        # 1. COCO format (commonly used with torchvision)
+        coco_data = {
+            "images": [{
+                "id": 1,
+                "width": img_width,
+                "height": img_height,
+                "file_name": f"{filename}.jpg"  # Assume jpg, adjust as needed
+            }],
+            "annotations": [],
+            "categories": []
+        }
+        
+        # Add categories
+        for i, label in enumerate(self.labels):
+            coco_data["categories"].append({
+                "id": i + 1,  # COCO categories start from 1
+                "name": label,
+                "supercategory": "object"
+            })
+        
+        # Add annotations
+        for ann_id, annotation in enumerate(self.rectangles):
+            x1, y1, x2, y2 = annotation['bbox']
+            width = x2 - x1
+            height = y2 - y1
+            area = width * height
+            
+            label = annotation['label']
+            category_id = self.labels.index(label) + 1 if label in self.labels else 1
+            
+            coco_data["annotations"].append({
+                "id": ann_id + 1,
+                "image_id": 1,
+                "category_id": category_id,
+                "bbox": [x1, y1, width, height],  # COCO format: [x, y, width, height]
+                "area": area,
+                "iscrowd": 0
+            })
+        
+        # Save COCO format
+        coco_path = os.path.join(self.pytorch_path, "annotations", f"{filename}_coco.json")
+        with open(coco_path, 'w') as f:
+            json.dump(coco_data, f, indent=2)
+        
+        # 2. Pascal VOC format (XML)
+        self.save_pascal_voc_format(filename, img_width, img_height)
+        
+        # 3. PyTorch custom format
+        pytorch_data = {
+            "image_info": {
+                "filename": f"{filename}.jpg",
+                "width": img_width,
+                "height": img_height,
+                "channels": 3
+            },
+            "annotations": [],
+            "classes": {label: i for i, label in enumerate(self.labels)}
+        }
+        
+        for annotation in self.rectangles:
+            x1, y1, x2, y2 = annotation['bbox']
+            label = annotation['label']
+            class_id = self.labels.index(label) if label in self.labels else 0
+            
+            pytorch_data["annotations"].append({
+                "class_id": class_id,
+                "class_name": label,
+                "bbox": [x1, y1, x2, y2],  # [x1, y1, x2, y2] format
+                "bbox_mode": "xyxy"
+            })
+        
+        # Save PyTorch format
+        pytorch_path = os.path.join(self.pytorch_path, "annotations", f"{filename}_pytorch.json")
+        with open(pytorch_path, 'w') as f:
+            json.dump(pytorch_data, f, indent=2)
+    
+    def save_pascal_voc_format(self, filename, img_width, img_height):
+        """Save annotations in Pascal VOC XML format"""
+        annotation = ET.Element("annotation")
+        
+        # Add folder
+        folder = ET.SubElement(annotation, "folder")
+        folder.text = "images"
+        
+        # Add filename
+        filename_elem = ET.SubElement(annotation, "filename")
+        filename_elem.text = f"{filename}.jpg"
+        
+        # Add path
+        path = ET.SubElement(annotation, "path")
+        path.text = self.current_image_path
+        
+        # Add source
+        source = ET.SubElement(annotation, "source")
+        database = ET.SubElement(source, "database")
+        database.text = "Unknown"
+        
+        # Add size
+        size = ET.SubElement(annotation, "size")
+        width = ET.SubElement(size, "width")
+        width.text = str(img_width)
+        height = ET.SubElement(size, "height")
+        height.text = str(img_height)
+        depth = ET.SubElement(size, "depth")
+        depth.text = "3"
+        
+        # Add segmented
+        segmented = ET.SubElement(annotation, "segmented")
+        segmented.text = "0"
+        
+        # Add objects
+        for rect_annotation in self.rectangles:
+            obj = ET.SubElement(annotation, "object")
+            
+            name = ET.SubElement(obj, "name")
+            name.text = rect_annotation['label']
+            
+            pose = ET.SubElement(obj, "pose")
+            pose.text = "Unspecified"
+            
+            truncated = ET.SubElement(obj, "truncated")
+            truncated.text = "0"
+            
+            difficult = ET.SubElement(obj, "difficult")
+            difficult.text = "0"
+            
+            bndbox = ET.SubElement(obj, "bndbox")
+            x1, y1, x2, y2 = rect_annotation['bbox']
+            
+            xmin = ET.SubElement(bndbox, "xmin")
+            xmin.text = str(int(x1))
+            ymin = ET.SubElement(bndbox, "ymin")
+            ymin.text = str(int(y1))
+            xmax = ET.SubElement(bndbox, "xmax")
+            xmax.text = str(int(x2))
+            ymax = ET.SubElement(bndbox, "ymax")
+            ymax.text = str(int(y2))
+        
+        # Save XML file
+        tree = ET.ElementTree(annotation)
+        xml_path = os.path.join(self.pytorch_path, "annotations", f"{filename}.xml")
+        tree.write(xml_path, encoding='utf-8', xml_declaration=True)
+    
+    def export_pytorch_dataset(self):
+        """Export complete PyTorch dataset with train/val split"""
+        try:
+            # Get all labeled images
+            labeled_files = []
+            for file in os.listdir(self.labeled_path):
+                if file.endswith('.json') and not file == 'classes.txt':
+                    labeled_files.append(file.replace('.json', ''))
+            
+            if not labeled_files:
+                messagebox.showwarning("Warning", "No labeled images found")
+                return
+            
+            # Ask for train/val split ratio
+            split_ratio = simpledialog.askfloat(
+                "Train/Val Split", 
+                "Enter train split ratio (0.0-1.0):\n(e.g., 0.8 for 80% train, 20% val)",
+                initialvalue=0.8,
+                minvalue=0.1,
+                maxvalue=0.9
+            )
+            
+            if split_ratio is None:
+                return
+            
+            import random
+            random.shuffle(labeled_files)
+            split_idx = int(len(labeled_files) * split_ratio)
+            train_files = labeled_files[:split_idx]
+            val_files = labeled_files[split_idx:]
+            
+            # Create dataset structure
+            dataset_path = os.path.join(self.pytorch_path, "dataset")
+            os.makedirs(dataset_path, exist_ok=True)
+            os.makedirs(os.path.join(dataset_path, "images", "train"), exist_ok=True)
+            os.makedirs(os.path.join(dataset_path, "images", "val"), exist_ok=True)
+            os.makedirs(os.path.join(dataset_path, "annotations", "train"), exist_ok=True)
+            os.makedirs(os.path.join(dataset_path, "annotations", "val"), exist_ok=True)
+            
+            # Copy and organize files
+            import shutil
+            
+            def copy_files(file_list, split_name):
+                for filename in file_list:
+                    # Copy image
+                    image_path = os.path.join(self.unlabeled_path, f"{filename}.jpg")
+                    if not os.path.exists(image_path):
+                        # Try other extensions
+                        for ext in ['.png', '.jpeg', '.bmp', '.tiff']:
+                            test_path = os.path.join(self.unlabeled_path, f"{filename}{ext}")
+                            if os.path.exists(test_path):
+                                image_path = test_path
+                                break
+                    
+                    if os.path.exists(image_path):
+                        shutil.copy2(image_path, os.path.join(dataset_path, "images", split_name))
+                    
+                    # Copy annotations
+                    for ann_file in [f"{filename}_coco.json", f"{filename}.xml", f"{filename}_pytorch.json"]:
+                        src_path = os.path.join(self.pytorch_path, "annotations", ann_file)
+                        if os.path.exists(src_path):
+                            shutil.copy2(src_path, os.path.join(dataset_path, "annotations", split_name))
+            
+            copy_files(train_files, "train")
+            copy_files(val_files, "val")
+            
+            # Create dataset info file
+            dataset_info = {
+                "dataset_name": "Custom Object Detection Dataset",
+                "created": datetime.now().isoformat(),
+                "num_classes": len(self.labels),
+                "classes": {i: label for i, label in enumerate(self.labels)},
+                "train_images": len(train_files),
+                "val_images": len(val_files),
+                "total_images": len(labeled_files),
+                "train_split": split_ratio,
+                "formats": ["coco", "pascal_voc", "pytorch_custom"]
+            }
+            
+            with open(os.path.join(dataset_path, "dataset_info.json"), 'w') as f:
+                json.dump(dataset_info, f, indent=2)
+            
+            # Create PyTorch dataset loader example
+            self.create_pytorch_dataset_loader(dataset_path)
+            
+            messagebox.showinfo(
+                "Success", 
+                f"PyTorch dataset exported successfully!\n\n"
+                f"Dataset location: {dataset_path}\n"
+                f"Train images: {len(train_files)}\n"
+                f"Val images: {len(val_files)}\n"
+                f"Classes: {len(self.labels)}\n\n"
+                f"Files created:\n"
+                f"- dataset_info.json\n"
+                f"- pytorch_dataset.py (example loader)\n"
+                f"- images/train/ and images/val/\n"
+                f"- annotations/train/ and annotations/val/"
+            )
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export PyTorch dataset: {str(e)}")
+    
+    def create_pytorch_dataset_loader(self, dataset_path):
+        """Create example PyTorch dataset loader code"""
+        loader_code = '''import torch
+from torch.utils.data import Dataset, DataLoader
+from PIL import Image
+import json
+import os
+from torchvision import transforms
+
+class CustomObjectDetectionDataset(Dataset):
+    def __init__(self, root_dir, split='train', transform=None, target_transform=None):
+        """
+        Custom PyTorch Dataset for object detection
+        
+        Args:
+            root_dir: Path to dataset directory
+            split: 'train' or 'val'
+            transform: Transform to apply to images
+            target_transform: Transform to apply to targets
+        """
+        self.root_dir = root_dir
+        self.split = split
+        self.transform = transform
+        self.target_transform = target_transform
+        
+        self.images_dir = os.path.join(root_dir, 'images', split)
+        self.annotations_dir = os.path.join(root_dir, 'annotations', split)
+        
+        # Load dataset info
+        with open(os.path.join(root_dir, 'dataset_info.json'), 'r') as f:
+            self.dataset_info = json.load(f)
+        
+        # Get image files
+        self.image_files = [f for f in os.listdir(self.images_dir) 
+                           if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        
+    def __len__(self):
+        return len(self.image_files)
+    
+    def __getitem__(self, idx):
+        # Load image
+        img_name = self.image_files[idx]
+        img_path = os.path.join(self.images_dir, img_name)
+        image = Image.open(img_path).convert('RGB')
+        
+        # Load annotations (PyTorch format)
+        base_name = os.path.splitext(img_name)[0]
+        ann_path = os.path.join(self.annotations_dir, f"{base_name}_pytorch.json")
+        
+        with open(ann_path, 'r') as f:
+            annotations = json.load(f)
+        
+        # Extract bboxes and labels
+        boxes = []
+        labels = []
+        
+        for ann in annotations['annotations']:
+            boxes.append(ann['bbox'])  # [x1, y1, x2, y2]
+            labels.append(ann['class_id'])
+        
+        # Convert to tensors
+        boxes = torch.as_tensor(boxes, dtype=torch.float32)
+        labels = torch.as_tensor(labels, dtype=torch.int64)
+        
+        target = {
+            'boxes': boxes,
+            'labels': labels,
+            'image_id': torch.tensor([idx])
+        }
+        
+        if self.transform:
+            image = self.transform(image)
+        
+        if self.target_transform:
+            target = self.target_transform(target)
+        
+        return image, target
+
+# Example usage:
+def get_data_loaders(dataset_path, batch_size=4):
+    """Create train and validation data loaders"""
+    
+    # Define transforms
+    train_transform = transforms.Compose([
+        transforms.Resize((416, 416)),  # Resize for YOLO
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                           std=[0.229, 0.224, 0.225])
+    ])
+    
+    val_transform = transforms.Compose([
+        transforms.Resize((416, 416)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                           std=[0.229, 0.224, 0.225])
+    ])
+    
+    # Create datasets
+    train_dataset = CustomObjectDetectionDataset(
+        dataset_path, 
+        split='train', 
+        transform=train_transform
+    )
+    
+    val_dataset = CustomObjectDetectionDataset(
+        dataset_path, 
+        split='val', 
+        transform=val_transform
+    )
+    
+    # Create data loaders
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=batch_size, 
+        shuffle=True,
+        collate_fn=lambda x: tuple(zip(*x))  # Custom collate for object detection
+    )
+    
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=batch_size, 
+        shuffle=False,
+        collate_fn=lambda x: tuple(zip(*x))
+    )
+    
+    return train_loader, val_loader
+
+# Example training loop structure:
+def train_model():
+    """Example training loop structure"""
+    dataset_path = "path/to/your/dataset"
+    train_loader, val_loader = get_data_loaders(dataset_path)
+    
+    # Load your model here
+    # model = YourModel(num_classes=len(dataset_info['classes']))
+    
+    for epoch in range(num_epochs):
+        for batch_idx, (images, targets) in enumerate(train_loader):
+            # Your training code here
+            pass
+            
+        # Validation
+        for batch_idx, (images, targets) in enumerate(val_loader):
+            # Your validation code here
+            pass
+
+if __name__ == "__main__":
+    # Test the dataset loader
+    dataset_path = "."  # Current directory
+    train_loader, val_loader = get_data_loaders(dataset_path, batch_size=2)
+    
+    print(f"Train batches: {len(train_loader)}")
+    print(f"Val batches: {len(val_loader)}")
+    
+    # Test loading one batch
+    for images, targets in train_loader:
+        print(f"Batch size: {len(images)}")
+        print(f"Image shape: {images[0].shape}")
+        print(f"Target keys: {targets[0].keys()}")
+        break
+'''
+        
+        loader_path = os.path.join(dataset_path, "pytorch_dataset.py")
+        with open(loader_path, 'w') as f:
+            f.write(loader_code)
     
     def load_existing_annotations(self):
         """Load existing annotations if they exist"""
